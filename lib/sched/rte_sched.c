@@ -1070,8 +1070,10 @@ rte_sched_subport_free(struct rte_sched_port *port,
 			for (; qr != qw; qr = (qr + 1) & (qsize - 1))
 				rte_pktmbuf_free(mbufs[qr]);
 		}
+		rte_ring_free(subport->dejitter_stats[qindex].latency_window);
+		rte_free(subport->dejitter_stats[qindex].latency_histogram);
 	}
-
+	rte_free(subport->dejitter_stats);
 	rte_free(subport);
 }
 
