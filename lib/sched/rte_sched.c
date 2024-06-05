@@ -12,10 +12,12 @@
 #include <rte_prefetch.h>
 #include <rte_branch_prediction.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_dyn.h>
 #include <rte_bitmap.h>
 #include <rte_reciprocal.h>
 
 #include "rte_sched.h"
+#include "rte_ring_core.h"
 #include "rte_sched_common.h"
 #include "rte_approx.h"
 
@@ -52,6 +54,22 @@ struct rte_sched_pipe_profile {
 
 	/* Pipe best-effort traffic class queues */
 	uint8_t  wrr_cost[RTE_SCHED_BE_QUEUES_PER_PIPE];
+};
+#define RTE_SCHED_DEJITTER_LATENCY_WINDOW_LENGTH 512
+#define RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH 1024
+#define RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION 2
+#define RTE_SCHED_DEJITTER_DELAY_PERCENTILE 0.95
+static int t_sent_offset; /* Offset of the t_sent dynefield in the mbuf. Used for calculating latency and delay */
+struct rte_sched_latency_stats {
+	/* A queue for the previous n latencies recorded at enqueue. Even though the ring can only store
+	 * void*, we cab circumvent this by casting the int to void*. This way we can decrease memory
+	 * fragmentation. The use of this method may cause issues on 32 bit systems, as the 64 bit signed
+	 * latency might not fit inside the 32 bit void* */
+	struct rte_ring *latency_window;
+	size_t *latency_histogram;
+	size_t latency_histogram_n;
+	int t_95;				/* 95th percentile latency */
+	float latency_histogram_resolution;	/* latencies per histogram element */
 };
 
 struct rte_sched_pipe {
@@ -136,6 +154,9 @@ struct rte_sched_grinder {
 	uint32_t qpos;
 	struct rte_mbuf *pkt;
 
+	/* Dejittering */
+	struct rte_sched_latency_stats *dejitter_stats;
+
 	/* WRR */
 	uint16_t wrr_tokens[RTE_SCHED_BE_QUEUES_PER_PIPE];
 	uint16_t wrr_mask[RTE_SCHED_BE_QUEUES_PER_PIPE];
@@ -209,7 +230,11 @@ struct rte_sched_subport {
 	struct rte_sched_pipe_profile *pipe_profiles;
 	uint8_t *bmp_array;
 	struct rte_mbuf **queue_array;
-	uint8_t memory[0] __rte_cache_aligned;
+
+	/* Dejittering stats */
+	struct rte_sched_latency_stats *dejitter_stats; /* aligned with the queue_array */
+
+  	uint8_t memory[0] __rte_cache_aligned;
 } __rte_cache_aligned;
 
 struct rte_sched_port {
@@ -238,6 +263,9 @@ struct rte_sched_port {
 	struct rte_mbuf **pkts_out;
 	uint32_t n_pkts_out;
 	uint32_t subport_id;
+
+	/* Dejittering */
+	bool dejitter_enabled;
 
 	/* Large data structures */
 	struct rte_sched_subport_profile *subport_profiles;
@@ -1042,8 +1070,10 @@ rte_sched_subport_free(struct rte_sched_port *port,
 			for (; qr != qw; qr = (qr + 1) & (qsize - 1))
 				rte_pktmbuf_free(mbufs[qr]);
 		}
+		rte_ring_free(subport->dejitter_stats[qindex].latency_window);
+		rte_free(subport->dejitter_stats[qindex].latency_histogram);
 	}
-
+	rte_free(subport->dejitter_stats);
 	rte_free(subport);
 }
 
@@ -1354,6 +1384,47 @@ rte_sched_subport_config(struct rte_sched_port *port,
 		/* Queue base calculation */
 		rte_sched_subport_config_qsize(s);
 
+		/* Dejittering stats */
+		// TODO: Use the s->memory memory region for this, just like the other
+		// array
+		if (port->dejitter_enabled) {
+			char dejitter_stats_label[46];
+			snprintf(dejitter_stats_label, 46, "dejitter stats. port: %p, subport: %d", port, subport_id);
+			s->dejitter_stats = rte_zmalloc_socket(dejitter_stats_label, s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE * sizeof(struct rte_sched_latency_stats), 0, port->socket);
+			if (s->dejitter_stats == NULL) {
+				printf("Failed to allocate memory for dejitter_stats\n");
+				goto dejitter_config_fail;
+			}
+			for (size_t i = 0;
+				i < s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE; i++) {
+				s->dejitter_stats[i].t_95 = UINT64_MAX;
+				/* Create unique labels for each ring otherwise ring creation fails after the first one. */
+				char label[30];
+				snprintf(label, 30, "p%p_sp%d_lw%ld", port, subport_id, i);
+				s->dejitter_stats[i].latency_window = rte_ring_create(label, RTE_SCHED_DEJITTER_LATENCY_WINDOW_LENGTH, port->socket, RING_F_SP_ENQ | RING_F_SC_DEQ | RING_F_EXACT_SZ);
+				if (s->dejitter_stats[i].latency_window == NULL) {
+					printf("Creation of ring for latency_window %ld with label %s at %p failed.\n", i, label, label);
+					goto dejitter_config_fail;
+				}
+				char hist_label[60];
+				snprintf(hist_label, 60, "port: %p, subport: %d, latency histogram queue%ld", port, subport_id, i);
+				s->dejitter_stats[i].latency_histogram = rte_zmalloc_socket(hist_label, RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH * sizeof(size_t), port->socket, 0);
+				if (s->dejitter_stats[i].latency_histogram == NULL) {
+					printf("Failed to allocate memory for dejitter_stats.\n");
+					goto dejitter_config_fail;
+				}
+				s->dejitter_stats[i].latency_histogram_n = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH;
+				s->dejitter_stats[i].latency_histogram_resolution = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION;
+			}
+			goto dejitter_config_success;
+		dejitter_config_fail:
+			RTE_LOG(NOTICE, SCHED,"%s: Dejitter configuration failed for subport %d. Disableing dejittering for the port\n", __func__, subport_id);
+			port->dejitter_enabled = false;
+			goto large_data_structures;
+		dejitter_config_success:
+			RTE_LOG(NOTICE, SCHED, "%s: Dejitter configured for subport %d\n", __func__, subport_id);
+		}
+	large_data_structures:
 		/* Large data structures */
 		s->pipe = (struct rte_sched_pipe *)
 			(s->memory + rte_sched_subport_get_array_base(params,
@@ -2045,6 +2116,44 @@ rte_sched_port_enqueue_qwa_prefetch0(struct rte_sched_port *port,
 	rte_prefetch0(q_qw);
 	rte_bitmap_prefetch0(subport->bmp, qindex);
 }
+/*
+ * @param latency_n Latency in nanoseconds
+ * */
+static inline size_t rte_sched_calc_hist_idx(const size_t base,
+                                             const int64_t latency_n,
+                                             const float resolution) {
+	return (latency_n - base) * resolution;
+}
+/* n must be smaller than 1 */
+static inline int64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
+                                         float n) {
+	uint32_t latency = 0;
+	size_t acc = 0;
+	uint32_t latencies_n = rte_ring_count(stats->latency_window);
+	while (latency < stats->latency_histogram_n && acc < latencies_n * n) {
+		acc += stats->latency_histogram[latency];
+		latency++;
+	}
+	return latency;
+}
+
+static inline void
+rte_sched_latency_enq(struct rte_sched_latency_stats *stats) {
+	struct timespec current_time;
+	clock_gettime(CLOCK_REALTIME, &current_time);
+	size_t hist_idx = rte_sched_calc_hist_idx(0, current_time.tv_nsec, stats->latency_histogram_resolution);
+	/* resolve latency that is outside of histogram's range. */
+	if (hist_idx >= stats->latency_histogram_n) {}
+	else {
+		/* Keep trying to enqueue the latency until it succeeds. */
+		while (rte_ring_enqueue(stats->latency_window, (void *)current_time.tv_nsec) == -ENOBUFS) {
+			size_t discard_var;
+			rte_ring_dequeue(stats->latency_window, (void **)&discard_var);
+		}
+		stats->latency_histogram[hist_idx]++;
+		stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
+	}
+}
 
 static inline int
 rte_sched_port_enqueue_qwa(struct rte_sched_port *port,
@@ -2078,7 +2187,8 @@ rte_sched_port_enqueue_qwa(struct rte_sched_port *port,
 
 	/* Activate queue in the subport bitmap */
 	rte_bitmap_set(subport->bmp, qindex);
-
+	/* Update latency statistics */
+	rte_sched_latency_enq(&subport->dejitter_stats[qindex]);
 	/* Statistics */
 	rte_sched_port_update_subport_stats(port, subport, qindex, pkt);
 	rte_sched_port_update_queue_stats(subport, qindex, pkt);
@@ -2117,6 +2227,7 @@ rte_sched_port_enqueue(struct rte_sched_port *port, struct rte_mbuf **pkts,
 	result = 0;
 	subport_qmask = (1 << (port->n_pipes_per_subport_log2 + 4)) - 1;
 
+	/* TODO: prefetch stats alongside queues to improve performance (although the CPU might predict mem accesses just fine) */
 	/*
 	 * Less then 6 input packets available, which is not enough to
 	 * feed the pipeline
@@ -2651,11 +2762,12 @@ grinder_next_tc(struct rte_sched_port *port,
 		grinder->queue[0] = subport->queue + qindex;
 		grinder->qbase[0] = qbase;
 		grinder->qindex[0] = qindex;
+		grinder->dejitter_stats = subport->dejitter_stats + qindex;
 		grinder->tccache_r++;
 
 		return 1;
 	}
-
+	/* The best effort queues are not dejittered */
 	grinder->queue[0] = subport->queue + qindex;
 	grinder->queue[1] = subport->queue + qindex + 1;
 	grinder->queue[2] = subport->queue + qindex + 2;
@@ -2863,6 +2975,22 @@ grinder_prefetch_mbuf(struct rte_sched_subport *subport, uint32_t pos)
 		rte_prefetch0(qbase + qr_next);
 	}
 }
+void
+rte_sched_set_t_sent(struct rte_mbuf *m, int64_t value) {
+	int64_t *t_sent = RTE_MBUF_DYNFIELD(m, t_sent_offset, int64_t*);
+	if (t_sent != NULL) {
+		*t_sent = value;
+	}
+}
+static inline bool
+need_delay(struct rte_sched_grinder *grinder) {
+	const int is_window_full = rte_ring_full(grinder->dejitter_stats->latency_window);
+	if (is_window_full)
+		return false;
+	struct timespec t_current;
+	int err = clock_gettime(CLOCK_REALTIME_ALARM, &t_current);
+	return t_current.tv_nsec - RTE_MBUF_DYNFIELD(grinder->pkt, t_sent_offset, int64_t) > grinder->dejitter_stats->t_95;
+}
 
 static inline uint32_t
 grinder_handle(struct rte_sched_port *port,
@@ -2920,7 +3048,9 @@ grinder_handle(struct rte_sched_port *port,
 		wrr_active = (grinder->tc_index == RTE_SCHED_TRAFFIC_CLASS_BE);
 
 		/* Look for next packet within the same TC */
-		if (result && grinder->qmask) {
+		/* If a packet needs to be delayed to reduce jitter, don't enter this
+		* branch, but continue looking for the next one */
+		if (result && grinder->qmask && !(port->dejitter_enabled && !wrr_active && need_delay(grinder))) {
 			if (wrr_active)
 				grinder_wrr(subport, pos);
 

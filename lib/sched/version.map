@@ -27,6 +27,6 @@ DPDK_24 {
 	rte_sched_subport_pipe_profile_add;
 	rte_sched_subport_read_stats;
 	rte_sched_subport_tc_ov_config;
-
+	rte_sched_set_t_sent;
 	local: *;
 };
