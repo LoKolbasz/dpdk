@@ -393,6 +393,27 @@ rte_sched_subport_config(struct rte_sched_port *port,
 	uint32_t subport_id,
 	struct rte_sched_subport_params *params,
 	uint32_t subport_profile_id);
+/**
+ * Hierarchical scheduler subport configuration
+ * @param port
+ *   Handle to port scheduler instance
+ * @param subport_id
+ *   Subport ID
+ * @param port_params
+ *   Port scheduler configuration parameter structure
+ * @param subport_params
+ *   Subport configuration parameters. Must be non-NULL.
+ * @param subport_profile_id
+ *   ID of subport bandwidth profile
+ * @return
+ *   0 upon success, error code otherwise
+ */
+int
+rte_sched_subport_reconfig(struct rte_sched_port *port,
+	uint32_t subport_id,
+	struct rte_sched_port_params *port_params,
+	struct rte_sched_subport_params *subport_params,
+	uint32_t subport_profile_id);
 
 /**
  * Hierarchical scheduler pipe configuration
@@ -413,6 +434,28 @@ rte_sched_pipe_config(struct rte_sched_port *port,
 	uint32_t subport_id,
 	uint32_t pipe_id,
 	int32_t pipe_profile);
+
+/**
+ * Hierarchical scheduler pipe reconfiguration
+ *
+ * @param port
+ *   Handle to port scheduler instance
+ * @param subport_id
+ *   Subport ID
+ * @param pipe_id
+ *   Pipe ID within subport
+ * @param pipe_profile
+ *   ID of subport-level pre-configured pipe profile
+ * @param params
+ *   Subport configuration parameters. Must be non-NULL.
+ * @return
+ *   0 upon success, error code otherwise
+ */
+int rte_sched_pipe_reconfig(struct rte_sched_port *port,
+	uint32_t subport_id,
+	uint32_t pipe_id,
+	int32_t pipe_profile,
+	struct rte_sched_subport_params *params);
 
 /**
  * Hierarchical scheduler memory footprint size per port

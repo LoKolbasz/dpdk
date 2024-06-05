@@ -1184,6 +1184,63 @@ rte_sched_subport_tc_ov_config(struct rte_sched_port *port,
 
 	return 0;
 }
+int rte_sched_pipe_reconfig(struct rte_sched_port *port,
+	uint32_t subport_id,
+	uint32_t pipe_id,
+	int32_t pipe_profile,
+	struct rte_sched_subport_params *params) {
+	int ret = 0;
+	uint32_t n_subports = subport_id;
+	if (port == NULL) {
+		// SCHED_LOG(ERR,
+		// 	"%s: Incorrect value for parameter port", __func__);
+		return 0;
+	}
+	if (params == NULL){
+		printf("Subport parameters cannot be null");
+		ret = -EINVAL;
+		goto out;
+	}
+	if (subport_id >= port->n_subports_per_port) {
+		// SCHED_LOG(ERR,
+		// 	"%s: Incorrect value for subport id", __func__);
+		ret = -EINVAL;
+		goto out;
+	}
+	struct rte_sched_subport *s = port->subports[subport_id];
+	/* Pipe profile table */
+	rte_sched_subport_config_pipe_profile_table(s, params, port->rate);
+	ret = rte_sched_pipe_config(port, subport_id, pipe_id, pipe_profile);
+	if (ret) {
+		printf("Configuration application failed\n");
+		// SCHED_LOG(-1,
+		// 	"%s: Subport bitmap init error", __func__);
+		ret = -EINVAL;
+		goto out;
+	}
+	return 0;
+out:
+	rte_sched_free_memory(port, n_subports);
+	return ret;
+}
+
+int
+rte_sched_subport_reconfig(struct rte_sched_port *port,
+	uint32_t subport_id,
+	struct rte_sched_port_params *port_params,
+	struct rte_sched_subport_params *subport_params,
+	uint32_t subport_profile_id)
+{
+	int ret = 0;
+	rte_sched_port_config_subport_profile_table(port, port_params, port->rate);
+	ret = rte_sched_subport_config(port,subport_id, subport_params, subport_profile_id);
+	if (ret) {
+		printf("Subport configuration failed\n");
+		goto out;
+	}
+out:
+	return ret;
+}
 
 int
 rte_sched_subport_config(struct rte_sched_port *port,
