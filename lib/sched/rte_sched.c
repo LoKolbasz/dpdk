@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
+#include <stdalign.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,7 +69,7 @@ struct rte_sched_latency_stats {
 	struct rte_ring *latency_window;
 	size_t *latency_histogram;
 	size_t latency_histogram_n;
-	int t_95;				/* 95th percentile latency */
+	int64_t t_95;				/* 95th percentile latency */
 	float latency_histogram_resolution;	/* latencies per histogram element */
 };
 
@@ -1023,7 +1024,18 @@ rte_sched_port_config(struct rte_sched_port_params *params)
 	port->rate = params->rate;
 	port->mtu = params->mtu + params->frame_overhead;
 	port->frame_overhead = params->frame_overhead;
-
+	port->dejitter_enabled = params->dejittering_enabled;
+	if (params->dejittering_enabled){
+		struct rte_mbuf_dynfield t_sent_params = {
+			"rte_sched_t_sent",
+			sizeof(int64_t),
+			alignof(int64_t),
+			0
+		};
+		int res = rte_mbuf_dynfield_register(&t_sent_params);
+	        if (res >= 0)
+	            t_sent_offset = res;
+	}
 	/* Timing */
 	port->time_cpu_cycles = rte_get_tsc_cycles();
 	port->time_cpu_bytes = 0;
@@ -1340,7 +1352,7 @@ rte_sched_subport_config(struct rte_sched_port *port,
 			}
 			for (size_t i = 0;
 				i < s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE; i++) {
-				s->dejitter_stats[i].t_95 = UINT64_MAX;
+				s->dejitter_stats[i].t_95 = INT64_MAX;
 				/* Create unique labels for each ring otherwise ring creation fails after the first one. */
 				char label[30];
 				snprintf(label, 30, "p%p_sp%d_lw%ld", port, subport_id, i);
