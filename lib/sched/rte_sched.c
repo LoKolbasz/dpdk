@@ -18,6 +18,7 @@
 #include <rte_reciprocal.h>
 
 #include "rte_sched.h"
+#include "rte_errno.h"
 #include "rte_ring_core.h"
 #include "rte_sched_common.h"
 #include "rte_approx.h"
@@ -1025,16 +1026,21 @@ rte_sched_port_config(struct rte_sched_port_params *params)
 	port->mtu = params->mtu + params->frame_overhead;
 	port->frame_overhead = params->frame_overhead;
 	port->dejitter_enabled = params->dejittering_enabled;
-	if (params->dejittering_enabled){
-		struct rte_mbuf_dynfield t_sent_params = {
-			"rte_sched_t_sent",
-			sizeof(int64_t),
-			alignof(int64_t),
-			0
-		};
-		int res = rte_mbuf_dynfield_register(&t_sent_params);
-	        if (res >= 0)
-	            t_sent_offset = res;
+	struct rte_mbuf_dynfield t_sent_params = {
+		"rte_sched_t_sent",
+		sizeof(int64_t),
+		alignof(int64_t),
+		0
+	};
+	/* By always initializing the dynfield we can avoid invalid memory accesses from an
+	 * application using this package. This could happen when setting t_sent when not
+	 * dejittering */
+	int res = rte_mbuf_dynfield_register(&t_sent_params);
+	if (res >= 0)
+		t_sent_offset = res;
+	else {
+		RTE_LOG(ERR, SCHED, "Could not create dynfield for t_sent.\n%s", rte_strerror(res));
+		return NULL;
 	}
 	/* Timing */
 	port->time_cpu_cycles = rte_get_tsc_cycles();
@@ -2142,8 +2148,9 @@ rte_sched_port_enqueue_qwa(struct rte_sched_port *port,
 
 	/* Activate queue in the subport bitmap */
 	rte_bitmap_set(subport->bmp, qindex);
-	/* Update latency statistics */
-	rte_sched_latency_enq(&subport->dejitter_stats[qindex]);
+	/* Update latency statistics if dejittering is enabled */
+	if (port->dejitter_enabled)
+		rte_sched_latency_enq(&subport->dejitter_stats[qindex]);
 	/* Statistics */
 	rte_sched_port_update_subport_stats(port, subport, qindex, pkt);
 	rte_sched_port_update_queue_stats(subport, qindex, pkt);
