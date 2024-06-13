@@ -2994,6 +2994,9 @@ rte_sched_set_t_sent(struct rte_mbuf *m, int64_t value) {
 		*t_sent = value;
 	}
 }
+static inline int64_t get_t_sent(struct rte_mbuf *m) {
+	return *RTE_MBUF_DYNFIELD(m, t_sent_offset, int64_t*);
+}
 static inline bool
 need_delay(struct rte_sched_grinder *grinder) {
 	const int is_window_full = rte_ring_full(grinder->dejitter_stats->latency_window);
@@ -3001,7 +3004,7 @@ need_delay(struct rte_sched_grinder *grinder) {
 		return false;
 	struct timespec t_current;
 	int err = clock_gettime(CLOCK_REALTIME_ALARM, &t_current);
-	return t_current.tv_nsec - RTE_MBUF_DYNFIELD(grinder->pkt, t_sent_offset, int64_t) > grinder->dejitter_stats->t_95;
+	return t_current.tv_nsec - get_t_sent(grinder->pkt) > grinder->dejitter_stats->t_95;
 }
 
 static inline uint32_t
