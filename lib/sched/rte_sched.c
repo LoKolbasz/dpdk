@@ -2102,7 +2102,7 @@ static inline int64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
 		acc += stats->latency_histogram[latency];
 		latency++;
 	}
-	return latency;
+	return latency * stats->latency_histogram_resolution;
 }
 
 static inline void
