@@ -173,6 +173,17 @@ struct rte_sched_cman_params {
 	};
 };
 
+struct rte_sched_dejitter_params {
+	/** How many of the last x packets recieved by a queue should be considered */
+	uint32_t latency_window_size;
+	/** The size of the histogram representing the distribution of packet latencies. If
+	 * increased, more latencies can be considered when considering whether to delay a packet */
+	size_t latency_histogram_size;
+	/** How many latencies should one "column" of the histogram hold. If increased, more packets
+	* will be considered one deciding wether to delay, at the cost of precision. This means
+	* delay fo packages that shouldn't have recieved it, and no delay for ones that should have. */
+	float latency_histogram_resolution;
+};
 /*
  * Subport configuration parameters. The period and credits_per_period
  * parameters are measured in bytes, with one byte meaning the time
@@ -213,6 +224,11 @@ struct rte_sched_subport_params {
 	 * otherwise proper parameters need to be provided.
 	 */
 	struct rte_sched_cman_params *cman_params;
+
+	/** Parameters used to configure dejittering
+	* If NULL a default configuration is used. Dejittering is enabled on the port level.
+	*/
+	struct rte_sched_dejitter_params *dejitter_params;
 };
 
 struct rte_sched_subport_profile_params {

@@ -4,6 +4,7 @@
 
 #include <stdalign.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <rte_common.h>
@@ -1349,6 +1350,12 @@ rte_sched_subport_config(struct rte_sched_port *port,
 		// TODO: Use the s->memory memory region for this, just like the other
 		// array
 		if (port->dejitter_enabled) {
+			if (params->dejitter_params == NULL) {
+				params->dejitter_params = malloc(sizeof(struct rte_sched_dejitter_params));
+				params->dejitter_params->latency_window_size = RTE_SCHED_DEJITTER_LATENCY_WINDOW_LENGTH;
+				params->dejitter_params->latency_histogram_size = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH;
+				params->dejitter_params->latency_histogram_resolution = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION;
+			}
 			char dejitter_stats_label[46];
 			snprintf(dejitter_stats_label, 46, "dejitter stats. port: %p, subport: %d", port, subport_id);
 			s->dejitter_stats = rte_zmalloc_socket(dejitter_stats_label, s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE * sizeof(struct rte_sched_latency_stats), 0, port->socket);
@@ -1369,13 +1376,13 @@ rte_sched_subport_config(struct rte_sched_port *port,
 				}
 				char hist_label[60];
 				snprintf(hist_label, 60, "port: %p, subport: %d, latency histogram queue%ld", port, subport_id, i);
-				s->dejitter_stats[i].latency_histogram = rte_zmalloc_socket(hist_label, RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH * sizeof(size_t), port->socket, 0);
+				s->dejitter_stats[i].latency_histogram = rte_zmalloc_socket(hist_label, params->dejitter_params->latency_window_size * sizeof(size_t), port->socket, 0);
 				if (s->dejitter_stats[i].latency_histogram == NULL) {
 					printf("Failed to allocate memory for dejitter_stats.\n");
 					goto dejitter_config_fail;
 				}
-				s->dejitter_stats[i].latency_histogram_n = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH;
-				s->dejitter_stats[i].latency_histogram_resolution = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION;
+				s->dejitter_stats[i].latency_histogram_n = params->dejitter_params->latency_histogram_size;
+				s->dejitter_stats[i].latency_histogram_resolution = params->dejitter_params->latency_histogram_size;
 			}
 			goto dejitter_config_success;
 		dejitter_config_fail:
