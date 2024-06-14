@@ -3,6 +3,7 @@
  */
 
 #include <stdalign.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2094,11 +2095,13 @@ static inline size_t rte_sched_calc_hist_idx(const size_t base,
 }
 /* n must be smaller than 1 */
 static inline int64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
-                                         float n) {
+                                         const float n) {
 	uint32_t latency = 0;
 	size_t acc = 0;
 	uint32_t latencies_n = rte_ring_count(stats->latency_window);
-	while (latency < stats->latency_histogram_n && acc < latencies_n * n) {
+	const size_t n_95th = latencies_n * n;
+	const uint32_t end_latency = stats->latency_histogram_n - 1;
+	while (latency < end_latency && acc < n_95th) {
 		acc += stats->latency_histogram[latency];
 		latency++;
 	}
