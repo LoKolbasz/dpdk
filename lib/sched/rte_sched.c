@@ -1422,7 +1422,7 @@ rte_sched_subport_config(struct rte_sched_port *port,
 			}
 			for (size_t i = 0;
 				i < s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE; i++) {
-				s->dejitter_stats[i].t_95 = INT64_MAX;
+				s->dejitter_stats[i].t_95 = -INT64_MAX;
 				/* Create unique labels for each ring otherwise ring creation fails after the first one. */
 				char label[30];
 				snprintf(label, 30, "p%p_sp%d_lw%ld", port, subport_id, i);
@@ -3018,7 +3018,7 @@ need_delay(struct rte_sched_grinder *grinder) {
 		return false;
 	struct timespec t_current;
 	int err = clock_gettime(CLOCK_REALTIME_ALARM, &t_current);
-	return t_current.tv_nsec - get_t_sent(grinder->pkt) > grinder->dejitter_stats->t_95;
+	return t_current.tv_nsec - get_t_sent(grinder->pkt) < grinder->dejitter_stats->t_95;
 }
 
 static inline uint32_t
