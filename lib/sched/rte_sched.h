@@ -654,10 +654,14 @@ int
 rte_sched_subport_tc_ov_config(struct rte_sched_port *port, uint32_t subport_id, bool tc_ov_enable);
 
 /**
+ * @param m
+ *   Packet
+ * @param value
+ *   Nanoseconds since epoch
  * Sets the t_sent dynfield for the mbuf. The dynfield is used for dejittering.
  * */
 void
-rte_sched_set_t_sent(struct rte_mbuf *m, int64_t value);
+rte_sched_set_t_sent(struct rte_mbuf *m, uint64_t value);
 
 #ifdef __cplusplus
 }
