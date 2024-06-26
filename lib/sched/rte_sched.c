@@ -2125,11 +2125,15 @@ static inline void
 rte_sched_latency_enq(struct rte_sched_latency_stats *stats, uint64_t t_sent) {
 	uint64_t current_time = rte_sched_dejitter_time();
 	uint64_t t_diff = current_time - t_sent;
+	size_t hist_idx;
 	if (current_time < t_sent) {
 		printf("ERR: Packet was sent from the future\nCurrent time: %lu, time sent: %lu\n", current_time, t_sent);
 		t_diff = 0;
+		hist_idx = 0;
 	}
-	size_t hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
+	else {
+	hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
+	}
 		// printf("Time elapsed since last hop: %lu\nHist idx: %lu\n", t_diff, hist_idx);
 	/* resolve latency that is outside of histogram's range. */
 	if (hist_idx >= stats->latency_histogram_n) {
@@ -2639,18 +2643,18 @@ grinder_schedule(struct rte_sched_port *port,
 	uint32_t be_tc_active;
 	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
 	static unsigned long c = 1;
-	static unsigned long p = 1;
+	static unsigned long p = 0;
+	p++;
 	if (delay){
 			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
 		c++;
+		return 0;
 	}
-	p++;
-
 	if (subport->tc_ov_enabled) {
-		if (!grinder_credits_check_with_tc_ov(port, subport, pos) || delay)
+		if (!grinder_credits_check_with_tc_ov(port, subport, pos))
 			return 0;
 	} else {
-		if (!grinder_credits_check(port, subport, pos) || delay)
+		if (!grinder_credits_check(port, subport, pos))
 			return 0;
 	}
 
@@ -3090,7 +3094,7 @@ grinder_handle(struct rte_sched_port *port,
 		/* Look for another active TC within same pipe */
 		// printf("Find new active tc\n");
 		if (grinder_next_tc(port, subport, pos)) {
-			printf("TC found\n");
+			// printf("TC found\n");
 			grinder_prefetch_tc_queue_arrays(subport, pos);
 
 			grinder->state = e_GRINDER_PREFETCH_MBUF;
