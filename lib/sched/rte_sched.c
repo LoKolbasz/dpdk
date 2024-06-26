@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
+#include <bits/time.h>
 #include <stdalign.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,9 +19,11 @@
 #include <rte_mbuf_dyn.h>
 #include <rte_bitmap.h>
 #include <rte_reciprocal.h>
+#include <time.h>
 
 #include "rte_sched.h"
 #include "rte_errno.h"
+#include "rte_ring.h"
 #include "rte_ring_core.h"
 #include "rte_sched_common.h"
 #include "rte_approx.h"
@@ -72,7 +75,7 @@ struct rte_sched_latency_stats {
 	struct rte_ring *latency_window;
 	size_t *latency_histogram;
 	size_t latency_histogram_n;
-	int64_t t_95;				/* 95th percentile latency */
+	uint64_t t_95;				/* 95th percentile latency */
 	float latency_histogram_resolution;	/* latencies per histogram element */
 };
 
@@ -285,6 +288,10 @@ enum rte_sched_subport_array {
 	e_RTE_SCHED_SUBPORT_ARRAY_QUEUE_ARRAY,
 	e_RTE_SCHED_SUBPORT_ARRAY_TOTAL,
 };
+static inline uint64_t get_t_sent(struct rte_mbuf *m) {
+	return *RTE_MBUF_DYNFIELD(m, t_sent_offset, uint64_t*);
+}
+static inline bool need_delay(struct rte_sched_grinder *grinder);
 
 static inline uint32_t
 rte_sched_subport_pipe_queues(struct rte_sched_subport *subport)
@@ -1366,11 +1373,11 @@ rte_sched_subport_config(struct rte_sched_port *port,
 			}
 			for (size_t i = 0;
 				i < s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE; i++) {
-				s->dejitter_stats[i].t_95 = -INT64_MAX;
+				s->dejitter_stats[i].t_95 = 0;
 				/* Create unique labels for each ring otherwise ring creation fails after the first one. */
 				char label[30];
 				snprintf(label, 30, "p%p_sp%d_lw%ld", port, subport_id, i);
-				s->dejitter_stats[i].latency_window = rte_ring_create(label, RTE_SCHED_DEJITTER_LATENCY_WINDOW_LENGTH, port->socket, RING_F_SP_ENQ | RING_F_SC_DEQ | RING_F_EXACT_SZ);
+				s->dejitter_stats[i].latency_window = rte_ring_create(label, params->dejitter_params->latency_window_size, port->socket, RING_F_SP_ENQ | RING_F_SC_DEQ | RING_F_EXACT_SZ);
 				if (s->dejitter_stats[i].latency_window == NULL) {
 					printf("Creation of ring for latency_window %ld with label %s at %p failed.\n", i, label, label);
 					goto dejitter_config_fail;
@@ -1383,7 +1390,7 @@ rte_sched_subport_config(struct rte_sched_port *port,
 					goto dejitter_config_fail;
 				}
 				s->dejitter_stats[i].latency_histogram_n = params->dejitter_params->latency_histogram_size;
-				s->dejitter_stats[i].latency_histogram_resolution = params->dejitter_params->latency_histogram_size;
+				s->dejitter_stats[i].latency_histogram_resolution = params->dejitter_params->latency_histogram_resolution;
 			}
 			goto dejitter_config_success;
 		dejitter_config_fail:
@@ -2091,12 +2098,12 @@ rte_sched_port_enqueue_qwa_prefetch0(struct rte_sched_port *port,
 static inline size_t rte_sched_calc_hist_idx(const size_t base,
                                              const int64_t latency_n,
                                              const float resolution) {
-	return (latency_n - base) * resolution;
+	return (latency_n - base) / resolution;
 }
 /* n must be smaller than 1 */
-static inline int64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
-                                         const float n) {
-	uint32_t latency = 0;
+static inline uint64_t get_nth_percentile(struct rte_sched_latency_stats *stats, const float n) {
+	// printf("Recalculating T95%%\n");
+	size_t latency = 0;
 	size_t acc = 0;
 	uint32_t latencies_n = rte_ring_count(stats->latency_window);
 	const size_t n_95th = latencies_n * n;
@@ -2105,25 +2112,52 @@ static inline int64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
 		acc += stats->latency_histogram[latency];
 		latency++;
 	}
+	printf("N: %f\tN95: %lu\tlat_n: %u\tlat: %lu\t capacity: %u\n", n, n_95th, latencies_n, latency, rte_ring_get_capacity(stats->latency_window));
 	return latency * stats->latency_histogram_resolution;
+}
+static inline uint64_t rte_sched_dejitter_time(void) {
+	struct timespec current_time;
+	clock_gettime(CLOCK_REALTIME, &current_time);
+	return UINT64_C(1000000000) * (uint64_t)current_time.tv_sec + (uint64_t)current_time.tv_nsec;
 }
 
 static inline void
-rte_sched_latency_enq(struct rte_sched_latency_stats *stats) {
-	struct timespec current_time;
-	clock_gettime(CLOCK_REALTIME, &current_time);
-	size_t hist_idx = rte_sched_calc_hist_idx(0, current_time.tv_nsec, stats->latency_histogram_resolution);
+rte_sched_latency_enq(struct rte_sched_latency_stats *stats, uint64_t t_sent) {
+	uint64_t current_time = rte_sched_dejitter_time();
+	uint64_t t_diff = current_time - t_sent;
+	if (current_time < t_sent) {
+		printf("ERR: Packet was sent from the future\nCurrent time: %lu, time sent: %lu\n", current_time, t_sent);
+		t_diff = 0;
+	}
+	size_t hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
+		// printf("Time elapsed since last hop: %lu\nHist idx: %lu\n", t_diff, hist_idx);
 	/* resolve latency that is outside of histogram's range. */
-	if (hist_idx >= stats->latency_histogram_n) {}
+	if (hist_idx >= stats->latency_histogram_n) {
+		printf("Latency %lu is out of range\n", hist_idx);
+	}
 	else {
 		/* Keep trying to enqueue the latency until it succeeds. */
-		while (rte_ring_enqueue(stats->latency_window, (void *)current_time.tv_nsec) == -ENOBUFS) {
-			size_t discard_var;
-			rte_ring_dequeue(stats->latency_window, (void **)&discard_var);
+		while (rte_ring_enqueue(stats->latency_window, (void *)hist_idx) == -ENOBUFS) {
+			size_t discard_latency_idx;
+			rte_ring_dequeue(stats->latency_window, (void **)&discard_latency_idx);
+			// size_t discard_latenct_idx = rte_sched_calc_hist_idx(0, discard_latency, stats->latency_histogram_resolution);
+			stats->latency_histogram[discard_latency_idx]--;
 		}
 		stats->latency_histogram[hist_idx]++;
-		stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
 	}
+	// const uint64_t old = stats->t_95;
+	stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
+	// printf("Old T95: %lu\nNew T95: %lu\n", old, stats->t_95);
+	// static uint64_t decrease_counter = 0;
+	// static uint64_t increase_counter = 0;
+	// if (old > stats->t_95){
+	// 	decrease_counter++;
+		// printf("T95 DECREASING increse counter:%lu decrease counter: %lu\n", increase_counter, decrease_counter);
+	// }
+	// else if (old < stats->t_95) {
+	// 	increase_counter++;
+	// 	// printf("T95 INCREASING increse counter:%lu decrease counter: %lu\n", increase_counter, decrease_counter);
+	// }
 }
 
 static inline int
@@ -2160,7 +2194,7 @@ rte_sched_port_enqueue_qwa(struct rte_sched_port *port,
 	rte_bitmap_set(subport->bmp, qindex);
 	/* Update latency statistics if dejittering is enabled */
 	if (port->dejitter_enabled)
-		rte_sched_latency_enq(&subport->dejitter_stats[qindex]);
+		rte_sched_latency_enq(&subport->dejitter_stats[qindex], get_t_sent(pkt));
 	/* Statistics */
 	rte_sched_port_update_subport_stats(port, subport, qindex, pkt);
 	rte_sched_port_update_queue_stats(subport, qindex, pkt);
@@ -2603,12 +2637,20 @@ grinder_schedule(struct rte_sched_port *port,
 	struct rte_mbuf *pkt = grinder->pkt;
 	uint32_t pkt_len = pkt->pkt_len + port->frame_overhead;
 	uint32_t be_tc_active;
+	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
+	static unsigned long c = 1;
+	static unsigned long p = 1;
+	if (delay){
+			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
+		c++;
+	}
+	p++;
 
 	if (subport->tc_ov_enabled) {
-		if (!grinder_credits_check_with_tc_ov(port, subport, pos))
+		if (!grinder_credits_check_with_tc_ov(port, subport, pos) || delay)
 			return 0;
 	} else {
-		if (!grinder_credits_check(port, subport, pos))
+		if (!grinder_credits_check(port, subport, pos) || delay)
 			return 0;
 	}
 
@@ -2948,23 +2990,23 @@ grinder_prefetch_mbuf(struct rte_sched_subport *subport, uint32_t pos)
 	}
 }
 void
-rte_sched_set_t_sent(struct rte_mbuf *m, int64_t value) {
-	int64_t *t_sent = RTE_MBUF_DYNFIELD(m, t_sent_offset, int64_t*);
+rte_sched_set_t_sent(struct rte_mbuf *m, uint64_t value) {
+	uint64_t *t_sent = RTE_MBUF_DYNFIELD(m, t_sent_offset, uint64_t*);
 	if (t_sent != NULL) {
 		*t_sent = value;
 	}
 }
-static inline int64_t get_t_sent(struct rte_mbuf *m) {
-	return *RTE_MBUF_DYNFIELD(m, t_sent_offset, int64_t*);
-}
 static inline bool
 need_delay(struct rte_sched_grinder *grinder) {
 	const int is_window_full = rte_ring_full(grinder->dejitter_stats->latency_window);
-	if (is_window_full)
+	if (!is_window_full)
 		return false;
-	struct timespec t_current;
-	int err = clock_gettime(CLOCK_REALTIME_ALARM, &t_current);
-	return t_current.tv_nsec - get_t_sent(grinder->pkt) < grinder->dejitter_stats->t_95;
+	const uint64_t t_current = rte_sched_dejitter_time();
+	const uint64_t t_pkt = get_t_sent(grinder->pkt);
+	bool out = unlikely(t_current < t_pkt) ? 0 < grinder->dejitter_stats->t_95 : t_current - t_pkt < grinder->dejitter_stats->t_95;
+	printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
+		// printf("Current T: %ld%ld ns\nT Sent   : %ld\nDelta T  :          %lu\nT 95%%: %ld\n", t_current.tv_sec, t_current.tv_nsec, get_t_sent(grinder->pkt), rte_sched_dejitter_time() - get_t_sent(grinder->pkt), grinder->dejitter_stats->t_95);
+	return out;
 }
 
 static inline uint32_t
@@ -3025,7 +3067,15 @@ grinder_handle(struct rte_sched_port *port,
 		/* Look for next packet within the same TC */
 		/* If a packet needs to be delayed to reduce jitter, don't enter this
 		* branch, but continue looking for the next one */
-		if (result && grinder->qmask && !(port->dejitter_enabled && !wrr_active && need_delay(grinder))) {
+		// const bool skip = port->dejitter_enabled && !wrr_active && need_delay(grinder);
+		// if (result && grinder->qmask && skip){
+			// static int skipcounter = 0;
+			// printf("Skipping!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! counter: %d\n", ++skipcounter);}
+		// if (!grinder->qmask)
+				// {printf("bad qmask");}
+		if (result && grinder->qmask/*  && !skip */) {
+			// static int enteringcounter = 0;
+		 	// printf("Not skipping counter: %d\n", ++enteringcounter);
 			if (wrr_active)
 				grinder_wrr(subport, pos);
 
@@ -3038,7 +3088,9 @@ grinder_handle(struct rte_sched_port *port,
 			grinder_wrr_store(subport, pos);
 
 		/* Look for another active TC within same pipe */
+		// printf("Find new active tc\n");
 		if (grinder_next_tc(port, subport, pos)) {
+			printf("TC found\n");
 			grinder_prefetch_tc_queue_arrays(subport, pos);
 
 			grinder->state = e_GRINDER_PREFETCH_MBUF;
@@ -3052,7 +3104,9 @@ grinder_handle(struct rte_sched_port *port,
 		grinder_evict(subport, pos);
 
 		/* Look for another active pipe */
+		// printf("Looking for another active pipe\n");
 		if (grinder_next_pipe(port, subport, pos)) {
+			// printf("pipe found\n");
 			grinder_prefetch_pipe(subport, pos);
 
 			grinder->state = e_GRINDER_PREFETCH_TC_QUEUE_ARRAYS;
@@ -3060,6 +3114,7 @@ grinder_handle(struct rte_sched_port *port,
 		}
 
 		/* No active pipe found */
+		// printf("No pipe :( result: %u\n", result);
 		subport->busy_grinders--;
 
 		grinder->state = e_GRINDER_PREFETCH_PIPE;
