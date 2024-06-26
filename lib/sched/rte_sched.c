@@ -2132,7 +2132,7 @@ rte_sched_latency_enq(struct rte_sched_latency_stats *stats, uint64_t t_sent) {
 		hist_idx = 0;
 	}
 	else {
-	hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
+		hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
 	}
 		// printf("Time elapsed since last hop: %lu\nHist idx: %lu\n", t_diff, hist_idx);
 	/* resolve latency that is outside of histogram's range. */
@@ -2651,10 +2651,10 @@ grinder_schedule(struct rte_sched_port *port,
 		return 0;
 	}
 	if (subport->tc_ov_enabled) {
-		if (!grinder_credits_check_with_tc_ov(port, subport, pos))
+		if (!grinder_credits_check_with_tc_ov(port, subport, pos) || delay)
 			return 0;
 	} else {
-		if (!grinder_credits_check(port, subport, pos))
+		if (!grinder_credits_check(port, subport, pos) || delay)
 			return 0;
 	}
 
