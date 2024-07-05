@@ -326,6 +326,13 @@ struct rte_sched_port_params {
 	float percentile;
 };
 
+struct pkt_latency {
+	/** Time since epoch when the packet was sent in nanoseconds. */
+	uint64_t t_sent;
+	/** Time between t_sent and the packet being received. */
+	uint64_t delta_t;
+};
+
 /*
  * Configuration
  */
@@ -614,11 +621,14 @@ rte_sched_subport_tc_ov_config(struct rte_sched_port *port, uint32_t subport_id,
  * @param m
  *   Packet
  * @param value
- *   Nanoseconds since epoch
+ *   Time properties of the packet
+ * @returns
+ *   0 on success
+ *   -1 if the offset was not configured
  * Sets the t_sent dynfield for the mbuf. The dynfield is used for dejittering.
  * */
-void
-rte_sched_set_t_sent(struct rte_mbuf *m, uint64_t value);
+int
+rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times);
 
 #ifdef __cplusplus
 }

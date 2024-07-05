@@ -22,6 +22,7 @@
 #include <time.h>
 
 #include "rte_sched.h"
+#include "generic/rte_prefetch.h"
 #include "rte_errno.h"
 #include "rte_ring.h"
 #include "rte_ring_core.h"
@@ -66,7 +67,7 @@ struct rte_sched_pipe_profile {
 #define RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH 1024
 #define RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION 2
 #define RTE_SCHED_DEJITTER_DELAY_PERCENTILE 0.95
-static int t_sent_offset; /* Offset of the t_sent dynefield in the mbuf. Used for calculating latency and delay */
+static int pkt_times_offset = -1; /* Offset of the rt_sched_pkt_times dynefield in the mbuf. Used for calculating latency and delay */
 struct rte_sched_latency_stats {
 	/* A queue for the previous n latencies recorded at enqueue. Even though the ring can only store
 	 * void*, we cab circumvent this by casting the int to void*. This way we can decrease memory
@@ -288,8 +289,13 @@ enum rte_sched_subport_array {
 	e_RTE_SCHED_SUBPORT_ARRAY_QUEUE_ARRAY,
 	e_RTE_SCHED_SUBPORT_ARRAY_TOTAL,
 };
-static inline uint64_t get_t_sent(struct rte_mbuf *m) {
-	return *RTE_MBUF_DYNFIELD(m, t_sent_offset, uint64_t*);
+static inline struct pkt_latency* get_pkt_times(const struct rte_mbuf *m) {
+	if (unlikely(pkt_times_offset == -1)) {
+		printf("ERR: offset was not initialized\n");
+		return NULL;
+	}
+	struct pkt_latency* lat = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency*);
+	return lat;
 }
 static inline bool need_delay(struct rte_sched_grinder *grinder);
 
@@ -1035,20 +1041,20 @@ rte_sched_port_config(struct rte_sched_port_params *params)
 	port->mtu = params->mtu + params->frame_overhead;
 	port->frame_overhead = params->frame_overhead;
 	port->dejitter_enabled = params->dejittering_enabled;
-	struct rte_mbuf_dynfield t_sent_params = {
-		"rte_sched_t_sent",
-		sizeof(int64_t),
-		alignof(int64_t),
+	struct rte_mbuf_dynfield pkt_times_params = {
+		"rte_sched_t_stats",
+		sizeof(struct pkt_latency),
+		alignof(struct pkt_latency),
 		0
 	};
 	/* By always initializing the dynfield we can avoid invalid memory accesses from an
 	 * application using this package. This could happen when setting t_sent when not
 	 * dejittering */
-	int res = rte_mbuf_dynfield_register(&t_sent_params);
+	int res = rte_mbuf_dynfield_register(&pkt_times_params);
 	if (res >= 0)
-		t_sent_offset = res;
+		pkt_times_offset = res;
 	else {
-		RTE_LOG(ERR, SCHED, "Could not create dynfield for t_sent.\n%s", rte_strerror(res));
+		RTE_LOG(ERR, SCHED, "Could not create dynfield for pkt_times.\n%s", rte_strerror(res));
 		return NULL;
 	}
 	/* Timing */
@@ -2106,52 +2112,54 @@ static inline uint64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
 	size_t latency = 0;
 	size_t acc = 0;
 	uint32_t latencies_n = rte_ring_count(stats->latency_window);
-	const size_t n_95th = latencies_n * n;
-	const uint32_t end_latency = stats->latency_histogram_n - 1;
+	const size_t n_95th = (float)latencies_n * n;
+	const uint32_t end_latency = stats->latency_histogram_n;
 	while (latency < end_latency && acc < n_95th) {
 		acc += stats->latency_histogram[latency];
 		latency++;
 	}
-	printf("N: %f\tN95: %lu\tlat_n: %u\tlat: %lu\t capacity: %u\n", n, n_95th, latencies_n, latency, rte_ring_get_capacity(stats->latency_window));
+	// printf("N: %f\tN95: %lu\tlat_n: %u\tlat: %lu\t capacity: %u\n", n, n_95th, latencies_n, latency, rte_ring_get_capacity(stats->latency_window));
 	return latency * stats->latency_histogram_resolution;
 }
 static inline uint64_t rte_sched_dejitter_time(void) {
 	struct timespec current_time;
 	clock_gettime(CLOCK_REALTIME, &current_time);
-	return UINT64_C(1000000000) * (uint64_t)current_time.tv_sec + (uint64_t)current_time.tv_nsec;
+	return UINT64_C(1000000000) * (int64_t)current_time.tv_sec + (int64_t)current_time.tv_nsec;
 }
 
 static inline void
-rte_sched_latency_enq(struct rte_sched_latency_stats *stats, uint64_t t_sent) {
-	uint64_t current_time = rte_sched_dejitter_time();
-	uint64_t t_diff = current_time - t_sent;
-	size_t hist_idx;
-	if (current_time < t_sent) {
-		printf("ERR: Packet was sent from the future\nCurrent time: %lu, time sent: %lu\n", current_time, t_sent);
-		t_diff = 0;
-		hist_idx = 0;
-	}
-	else {
-		hist_idx = rte_sched_calc_hist_idx(0, t_diff, stats->latency_histogram_resolution);
-	}
+rte_sched_latency_enq(struct rte_sched_latency_stats *stats, const struct pkt_latency *lat) {
+	size_t hist_idx = rte_sched_calc_hist_idx(0, lat->delta_t, stats->latency_histogram_resolution);
 		// printf("Time elapsed since last hop: %lu\nHist idx: %lu\n", t_diff, hist_idx);
 	/* resolve latency that is outside of histogram's range. */
 	if (hist_idx >= stats->latency_histogram_n) {
-		printf("Latency %lu is out of range\n", hist_idx);
+		printf("Latency %lu with idx %lu is out of range [0, %lu]\n", lat->delta_t, hist_idx, stats->latency_histogram_n);
 	}
 	else {
+		// printf("In range %lu\n", hist_idx);
+		stats->latency_histogram[hist_idx]++;
 		/* Keep trying to enqueue the latency until it succeeds. */
 		while (rte_ring_enqueue(stats->latency_window, (void *)hist_idx) == -ENOBUFS) {
 			size_t discard_latency_idx;
 			rte_ring_dequeue(stats->latency_window, (void **)&discard_latency_idx);
 			// size_t discard_latenct_idx = rte_sched_calc_hist_idx(0, discard_latency, stats->latency_histogram_resolution);
+			// printf("Dequeueing %lu\n", discard_latency_idx);
 			stats->latency_histogram[discard_latency_idx]--;
 		}
-		stats->latency_histogram[hist_idx]++;
+		// const uint64_t old = stats->t_95;
+		stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
+		// if (old != stats->t_95)
+		// {
+		// 	uint32_t old_s = old / 1000000000;
+		// 	uint32_t old_ms = (old - old_s * 1000000000) / 1000000;
+		// 	uint32_t old_ns = (old - old_s * 1000000000 - old_ms * 1000000);
+		//
+		// 	uint32_t new_s = stats->t_95 / 1000000000;
+		// 	uint32_t new_ms = (stats->t_95 - new_s * 1000000000) / 1000000;
+		// 	uint32_t new_ns = (stats->t_95 - new_s * 1000000000 - new_ms * 1000000);
+		// 	printf("Old T95: %us %ums %uns \nNew T95: %us %ums %uns\n", old_s, old_ms, old_ns, new_s, new_ms, new_ns);
+		// }
 	}
-	// const uint64_t old = stats->t_95;
-	stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
-	// printf("Old T95: %lu\nNew T95: %lu\n", old, stats->t_95);
 	// static uint64_t decrease_counter = 0;
 	// static uint64_t increase_counter = 0;
 	// if (old > stats->t_95){
@@ -2198,7 +2206,7 @@ rte_sched_port_enqueue_qwa(struct rte_sched_port *port,
 	rte_bitmap_set(subport->bmp, qindex);
 	/* Update latency statistics if dejittering is enabled */
 	if (port->dejitter_enabled)
-		rte_sched_latency_enq(&subport->dejitter_stats[qindex], get_t_sent(pkt));
+		rte_sched_latency_enq(&subport->dejitter_stats[qindex], get_pkt_times(pkt));
 	/* Statistics */
 	rte_sched_port_update_subport_stats(port, subport, qindex, pkt);
 	rte_sched_port_update_queue_stats(subport, qindex, pkt);
@@ -2642,12 +2650,12 @@ grinder_schedule(struct rte_sched_port *port,
 	uint32_t pkt_len = pkt->pkt_len + port->frame_overhead;
 	uint32_t be_tc_active;
 	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
-	static unsigned long c = 1;
-	static unsigned long p = 0;
-	p++;
+	// static unsigned long c = 1;
+	// static unsigned long p = 0;
+	// p++;
 	if (delay){
-			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
-		c++;
+			// printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
+		// c++;
 		return 0;
 	}
 	if (subport->tc_ov_enabled) {
@@ -2993,12 +3001,18 @@ grinder_prefetch_mbuf(struct rte_sched_subport *subport, uint32_t pos)
 		rte_prefetch0(qbase + qr_next);
 	}
 }
-void
-rte_sched_set_t_sent(struct rte_mbuf *m, uint64_t value) {
-	uint64_t *t_sent = RTE_MBUF_DYNFIELD(m, t_sent_offset, uint64_t*);
-	if (t_sent != NULL) {
-		*t_sent = value;
+int
+rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times) {
+	if (unlikely(pkt_times_offset < 0))
+		return -1;
+	struct pkt_latency *fields = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency*);
+	if (fields == NULL) {
+		return -1;
 	}
+
+	fields->t_sent = pkt_times->t_sent;
+	fields->delta_t = pkt_times->delta_t;
+	return 0;
 }
 static inline bool
 need_delay(struct rte_sched_grinder *grinder) {
@@ -3006,9 +3020,9 @@ need_delay(struct rte_sched_grinder *grinder) {
 	if (!is_window_full)
 		return false;
 	const uint64_t t_current = rte_sched_dejitter_time();
-	const uint64_t t_pkt = get_t_sent(grinder->pkt);
-	bool out = unlikely(t_current < t_pkt) ? 0 < grinder->dejitter_stats->t_95 : t_current - t_pkt < grinder->dejitter_stats->t_95;
-	printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
+	const uint64_t t_pkt = get_pkt_times(grinder->pkt)->t_sent;
+	bool out = !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->t_95;
+	// printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
 		// printf("Current T: %ld%ld ns\nT Sent   : %ld\nDelta T  :          %lu\nT 95%%: %ld\n", t_current.tv_sec, t_current.tv_nsec, get_t_sent(grinder->pkt), rte_sched_dejitter_time() - get_t_sent(grinder->pkt), grinder->dejitter_stats->t_95);
 	return out;
 }
@@ -3042,6 +3056,11 @@ grinder_handle(struct rte_sched_port *port,
 						subport->profile;
 
 		grinder_prefetch_tc_queue_arrays(subport, pos);
+		// if (port->dejitter_enabled) {
+		// 	rte_prefetch0(grinder->dejitter_stats);
+		// 	rte_prefetch0(grinder->dejitter_stats->latency_window);
+		// 	rte_prefetch0(grinder->dejitter_stats->latency_histogram);
+		// }
 
 		if (subport->tc_ov_enabled)
 			grinder_credits_update_with_tc_ov(port, subport, pos);
