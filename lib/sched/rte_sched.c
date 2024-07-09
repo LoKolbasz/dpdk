@@ -3056,11 +3056,11 @@ grinder_handle(struct rte_sched_port *port,
 						subport->profile;
 
 		grinder_prefetch_tc_queue_arrays(subport, pos);
-		// if (port->dejitter_enabled) {
-		// 	rte_prefetch0(grinder->dejitter_stats);
-		// 	rte_prefetch0(grinder->dejitter_stats->latency_window);
-		// 	rte_prefetch0(grinder->dejitter_stats->latency_histogram);
-		// }
+		if (port->dejitter_enabled) {
+			// rte_prefetch0(grinder->dejitter_stats);
+			// rte_prefetch0(grinder->dejitter_stats->latency_window);
+			rte_prefetch0(grinder->dejitter_stats->latency_histogram);
+		}
 
 		if (subport->tc_ov_enabled)
 			grinder_credits_update_with_tc_ov(port, subport, pos);
