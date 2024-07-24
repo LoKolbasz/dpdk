@@ -1390,7 +1390,7 @@ rte_sched_subport_config(struct rte_sched_port *port,
 				}
 				char hist_label[60];
 				snprintf(hist_label, 60, "port: %p, subport: %d, latency histogram queue%ld", port, subport_id, i);
-				s->dejitter_stats[i].latency_histogram = rte_zmalloc_socket(hist_label, params->dejitter_params->latency_window_size * sizeof(size_t), port->socket, 0);
+				s->dejitter_stats[i].latency_histogram = rte_zmalloc_socket(hist_label, params->dejitter_params->latency_histogram_size * sizeof(size_t), port->socket, 0);
 				if (s->dejitter_stats[i].latency_histogram == NULL) {
 					printf("Failed to allocate memory for dejitter_stats.\n");
 					goto dejitter_config_fail;
@@ -2650,12 +2650,12 @@ grinder_schedule(struct rte_sched_port *port,
 	uint32_t pkt_len = pkt->pkt_len + port->frame_overhead;
 	uint32_t be_tc_active;
 	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
-	// static unsigned long c = 1;
-	// static unsigned long p = 0;
-	// p++;
+	static unsigned long c = 1;
+	static unsigned long p = 0;
+	p++;
 	if (delay){
-			// printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
-		// c++;
+			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
+		c++;
 		return 0;
 	}
 	if (subport->tc_ov_enabled) {
