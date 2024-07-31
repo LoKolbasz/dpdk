@@ -289,7 +289,7 @@ enum rte_sched_subport_array {
 	e_RTE_SCHED_SUBPORT_ARRAY_QUEUE_ARRAY,
 	e_RTE_SCHED_SUBPORT_ARRAY_TOTAL,
 };
-static inline struct pkt_latency* get_pkt_times(const struct rte_mbuf *m) {
+struct pkt_latency* get_pkt_times(const struct rte_mbuf *m) {
 	if (unlikely(pkt_times_offset == -1)) {
 		printf("ERR: offset was not initialized\n");
 		return NULL;
@@ -2175,7 +2175,7 @@ static inline uint64_t get_nth_percentile(struct rte_sched_latency_stats *stats,
 		acc += stats->latency_histogram[latency];
 		latency++;
 	}
-	// printf("N: %f\tN95: %lu\tlat_n: %u\tlat: %lu\t capacity: %u\n", n, n_95th, latencies_n, latency, rte_ring_get_capacity(stats->latency_window));
+	// printf("N: %f\tN95: %lu\tlat_n: %u\tlat: %lu\t capacity: %u acc: %lu lat val %lu\n", n, n_95th, latencies_n, latency, rte_ring_get_capacity(stats->latency_window), acc, stats->latency_histogram[latency]) ;
 	return latency * stats->latency_histogram_resolution;
 }
 static inline uint64_t rte_sched_dejitter_time(void) {
@@ -2197,11 +2197,12 @@ rte_sched_latency_enq(struct rte_sched_latency_stats *stats, const struct pkt_la
 		stats->latency_histogram[hist_idx]++;
 		/* Keep trying to enqueue the latency until it succeeds. */
 		while (rte_ring_enqueue(stats->latency_window, (void *)hist_idx) == -ENOBUFS) {
-			size_t discard_latency_idx;
+			size_t discard_latency_idx = 0;
 			rte_ring_dequeue(stats->latency_window, (void **)&discard_latency_idx);
 			// size_t discard_latenct_idx = rte_sched_calc_hist_idx(0, discard_latency, stats->latency_histogram_resolution);
 			// printf("Dequeueing %lu\n", discard_latency_idx);
-			stats->latency_histogram[discard_latency_idx]--;
+			if (stats->latency_histogram[discard_latency_idx])
+				stats->latency_histogram[discard_latency_idx]--;
 		}
 		// const uint64_t old = stats->t_95;
 		stats->t_95 = get_nth_percentile(stats, RTE_SCHED_DEJITTER_DELAY_PERCENTILE);
@@ -2210,11 +2211,11 @@ rte_sched_latency_enq(struct rte_sched_latency_stats *stats, const struct pkt_la
 		// 	uint32_t old_s = old / 1000000000;
 		// 	uint32_t old_ms = (old - old_s * 1000000000) / 1000000;
 		// 	uint32_t old_ns = (old - old_s * 1000000000 - old_ms * 1000000);
-		//
+		// //
 		// 	uint32_t new_s = stats->t_95 / 1000000000;
 		// 	uint32_t new_ms = (stats->t_95 - new_s * 1000000000) / 1000000;
 		// 	uint32_t new_ns = (stats->t_95 - new_s * 1000000000 - new_ms * 1000000);
-		// 	printf("Old T95: %us %ums %uns \nNew T95: %us %ums %uns\n", old_s, old_ms, old_ns, new_s, new_ms, new_ns);
+			// printf("Old T95: %us %ums %uns \nNew T95: %us %ums %uns\nDelta T: %lu\n", old_s, old_ms, old_ns, new_s, new_ms, new_ns, lat->delta_t);
 		// }
 	}
 	// static uint64_t decrease_counter = 0;
@@ -2709,9 +2710,13 @@ grinder_schedule(struct rte_sched_port *port,
 	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
 	static unsigned long c = 1;
 	static unsigned long p = 0;
+	static int counter = 0;
 	p++;
 	if (delay){
+		if (counter >= 1000) {
 			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
+			counter = 0;
+		}
 		c++;
 		return 0;
 	}

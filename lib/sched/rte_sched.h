@@ -659,6 +659,7 @@ rte_sched_port_dequeue(struct rte_sched_port *port, struct rte_mbuf **pkts, uint
  */
 int
 rte_sched_subport_tc_ov_config(struct rte_sched_port *port, uint32_t subport_id, bool tc_ov_enable);
+struct pkt_latency* get_pkt_times(const struct rte_mbuf *m);
 
 /**
  * @param m
