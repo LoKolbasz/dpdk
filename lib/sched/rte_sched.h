@@ -659,7 +659,19 @@ rte_sched_port_dequeue(struct rte_sched_port *port, struct rte_mbuf **pkts, uint
  */
 int
 rte_sched_subport_tc_ov_config(struct rte_sched_port *port, uint32_t subport_id, bool tc_ov_enable);
-struct pkt_latency* get_pkt_times(const struct rte_mbuf *m);
+
+/**
+ * Retreives the timing (statistics used for dejittering) used for dejittering.
+ */
+struct pkt_latency*
+get_pkt_times(const struct rte_mbuf *m);
+
+/**
+ * Set the maximum delay for a queue. If the delay the added delay of the dejitterer would be larger
+ * than this value, this value will be used instead.
+ */
+void
+rte_sched_request_min_delay(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay);
 
 /**
  * @param m

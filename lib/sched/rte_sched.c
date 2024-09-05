@@ -78,6 +78,7 @@ struct rte_sched_latency_stats {
 	size_t latency_histogram_n;
 	uint64_t t_95;				/* 95th percentile latency */
 	float latency_histogram_resolution;	/* latencies per histogram element */
+	uint64_t requested_delay;
 };
 
 struct rte_sched_pipe {
@@ -164,6 +165,7 @@ struct rte_sched_grinder {
 
 	/* Dejittering */
 	struct rte_sched_latency_stats *dejitter_stats;
+	// uint64_t requested_delay;
 
 	/* WRR */
 	uint16_t wrr_tokens[RTE_SCHED_BE_QUEUES_PER_PIPE];
@@ -241,6 +243,7 @@ struct rte_sched_subport {
 
 	/* Dejittering stats */
 	struct rte_sched_latency_stats *dejitter_stats; /* aligned with the queue_array */
+	// uint64_t *requested_delays;
 
   	uint8_t memory[0] __rte_cache_aligned;
 } __rte_cache_aligned;
@@ -1107,6 +1110,7 @@ rte_sched_subport_free(struct rte_sched_port *port,
 		rte_free(subport->dejitter_stats[qindex].latency_histogram);
 	}
 	rte_free(subport->dejitter_stats);
+	// rte_free(subport->requested_delays);
 	rte_free(subport);
 }
 
@@ -1427,6 +1431,10 @@ rte_sched_subport_config(struct rte_sched_port *port,
 				params->dejitter_params->latency_histogram_size = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_LENGTH;
 				params->dejitter_params->latency_histogram_resolution = RTE_SCHED_DEJITTER_DEFAULT_HISTOGRAM_RESOLUTION;
 			}
+			// s->requested_delays = malloc(s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE * sizeof(uint64_t));
+			// for (size_t i = 0; i < s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE; ++i) {
+			// 	s->requested_delays[i] = -1;
+			// }
 			char dejitter_stats_label[46];
 			snprintf(dejitter_stats_label, 46, "dejitter stats. port: %p, subport: %d", port, subport_id);
 			s->dejitter_stats = rte_zmalloc_socket(dejitter_stats_label, s->n_pipes_per_subport_enabled * RTE_SCHED_QUEUES_PER_PIPE * sizeof(struct rte_sched_latency_stats), 0, port->socket);
@@ -2851,6 +2859,7 @@ grinder_next_tc(struct rte_sched_port *port,
 		grinder->qbase[0] = qbase;
 		grinder->qindex[0] = qindex;
 		grinder->dejitter_stats = subport->dejitter_stats + qindex;
+		// grinder->requested_delay = *(subport->requested_delays + qindex);
 		grinder->tccache_r++;
 
 		return 1;
@@ -3076,14 +3085,24 @@ rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times) {
 	fields->delta_t = pkt_times->delta_t;
 	return 0;
 }
+
+void rte_sched_request_min_delay(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay) {
+	struct rte_sched_subport *port_subport = port->subports[subport];
+	port_subport->dejitter_stats[RTE_SCHED_QUEUES_PER_PIPE * pipe + traffic_class + queue].requested_delay = requested_minimum_delay;
+}
+
 static inline bool
 need_delay(struct rte_sched_grinder *grinder) {
 	const int is_window_full = rte_ring_full(grinder->dejitter_stats->latency_window);
-	if (!is_window_full)
-		return false;
 	const uint64_t t_current = rte_sched_dejitter_time();
 	const uint64_t t_pkt = get_pkt_times(grinder->pkt)->t_sent;
-	bool out = !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->t_95;
+	uint64_t t_threshold =  is_window_full ? RTE_MIN(grinder->dejitter_stats->t_95, grinder->dejitter_stats->requested_delay) : grinder->dejitter_stats->requested_delay;
+	if (unlikely(t_threshold == UINT64_MAX)) {
+		t_threshold = 0;
+	}
+	if (!is_window_full)
+		return !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->t_95;
+	bool out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
 	// printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
 		// printf("Current T: %ld%ld ns\nT Sent   : %ld\nDelta T  :          %lu\nT 95%%: %ld\n", t_current.tv_sec, t_current.tv_nsec, get_t_sent(grinder->pkt), rte_sched_dejitter_time() - get_t_sent(grinder->pkt), grinder->dejitter_stats->t_95);
 	return out;
