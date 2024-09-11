@@ -3087,6 +3087,8 @@ rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times) {
 }
 
 void rte_sched_request_min_delay(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay) {
+	if (!port->dejitter_enabled)
+		return;
 	struct rte_sched_subport *port_subport = port->subports[subport];
 	port_subport->dejitter_stats[RTE_SCHED_QUEUES_PER_PIPE * pipe + traffic_class + queue].requested_delay = requested_minimum_delay;
 }
