@@ -674,6 +674,12 @@ void
 rte_sched_request_min_delay(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay);
 
 /**
+ * Set wether the port performs dejittering.
+ */
+void
+rte_sched_dejitter_set(struct rte_sched_port* port, bool enabled);
+
+/**
  * @param m
  *   Packet
  * @param value

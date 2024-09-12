@@ -3322,3 +3322,7 @@ rte_sched_port_dequeue(struct rte_sched_port *port, struct rte_mbuf **pkts, uint
 
 	return count;
 }
+
+void rte_sched_dejitter_set(struct rte_sched_port* port, bool enabled) {
+	port->dejitter_enabled = enabled;
+}
