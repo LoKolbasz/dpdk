@@ -2715,7 +2715,7 @@ grinder_schedule(struct rte_sched_port *port,
 	struct rte_mbuf *pkt = grinder->pkt;
 	uint32_t pkt_len = pkt->pkt_len + port->frame_overhead;
 	uint32_t be_tc_active;
-	const bool delay = port -> dejitter_enabled && need_delay(grinder) && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE;
+	const bool delay = port -> dejitter_enabled && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE && need_delay(grinder) ;
 	static unsigned long c = 1;
 	static unsigned long p = 0;
 	static int counter = 0;
@@ -3102,6 +3102,7 @@ need_delay(struct rte_sched_grinder *grinder) {
 	if (unlikely(t_threshold == UINT64_MAX)) {
 		t_threshold = 0;
 	}
+	// printf("Threshold:\t%lu\n", grinder->dejitter_stats->requested_delay);
 	if (!is_window_full)
 		return !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->t_95;
 	bool out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
@@ -3142,7 +3143,7 @@ grinder_handle(struct rte_sched_port *port,
 		if (port->dejitter_enabled) {
 			// rte_prefetch0(grinder->dejitter_stats);
 			// rte_prefetch0(grinder->dejitter_stats->latency_window);
-			rte_prefetch0(grinder->dejitter_stats->latency_histogram);
+			// rte_prefetch0(grinder->dejitter_stats->latency_histogram);
 		}
 
 		if (subport->tc_ov_enabled)
