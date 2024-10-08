@@ -331,6 +331,8 @@ struct pkt_latency {
 	uint64_t t_sent;
 	/** Time between t_sent and the packet being received. */
 	uint64_t delta_t;
+	/**The time interval for how long was the package kept back*/
+	uint64_t actual_delay;
 };
 
 /*
