@@ -2716,16 +2716,16 @@ grinder_schedule(struct rte_sched_port *port,
 	uint32_t pkt_len = pkt->pkt_len + port->frame_overhead;
 	uint32_t be_tc_active;
 	const bool delay = port -> dejitter_enabled && grinder->tc_index != RTE_SCHED_TRAFFIC_CLASS_BE && need_delay(grinder) ;
-	static unsigned long c = 1;
-	static unsigned long p = 0;
-	static int counter = 0;
-	p++;
+	// static unsigned long c = 1;
+	// static unsigned long p = 0;
+	// static int counter = 0;
+	// p++;
 	if (delay){
-		if (counter >= 1000) {
-			printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
-			counter = 0;
-		}
-		c++;
+		// if (counter >= 1000) {
+			// printf("Delaying!!!!!!!!!!!!!!!!!!!!!!!!!!!! skipped: %lu passed: %lu {%f}\n", c - 1, p - 1, (float)c / (float)p);
+			// counter = 0;
+		// }
+		// c++;
 		return 0;
 	}
 	if (subport->tc_ov_enabled) {
@@ -3105,9 +3105,11 @@ need_delay(struct rte_sched_grinder *grinder) {
 		t_threshold = 0;
 	}
 	// printf("Threshold:\t%lu\n", grinder->dejitter_stats->requested_delay);
+	bool out = false;
 	if (!is_window_full)
-		return !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->t_95;
-	bool out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
+		out = !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->requested_delay;
+	else
+		out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
 	if (out) {
 		if (times->actual_delay == 0) {
 			// store the timestamp of the first time the packet got delayed
@@ -3115,7 +3117,7 @@ need_delay(struct rte_sched_grinder *grinder) {
 		}
 	} else if (times->actual_delay != 0) {
 		// If the packet no longer needs delay, set the time it was delayed for
-		times->actual_delay = t_current - times->actual_delay;
+		times->actual_delay = t_current > times->actual_delay ? t_current - times->actual_delay : 0;
 	}
 	// printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
 		// printf("Current T: %ld%ld ns\nT Sent   : %ld\nDelta T  :          %lu\nT 95%%: %ld\n", t_current.tv_sec, t_current.tv_nsec, get_t_sent(grinder->pkt), rte_sched_dejitter_time() - get_t_sent(grinder->pkt), grinder->dejitter_stats->t_95);
