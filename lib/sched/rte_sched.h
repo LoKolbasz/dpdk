@@ -333,6 +333,7 @@ struct pkt_latency {
 	uint64_t delta_t;
 	/**The time interval for how long was the package kept back*/
 	uint64_t actual_delay;
+	uint64_t delay_start;
 };
 
 /*

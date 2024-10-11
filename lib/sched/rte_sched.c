@@ -3084,6 +3084,7 @@ rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times) {
 	fields->t_sent = pkt_times->t_sent;
 	fields->delta_t = pkt_times->delta_t;
 	fields->actual_delay = 0;
+	fields->delay_start = 0;
 	return 0;
 }
 
@@ -3105,19 +3106,13 @@ need_delay(struct rte_sched_grinder *grinder) {
 		t_threshold = 0;
 	}
 	// printf("Threshold:\t%lu\n", grinder->dejitter_stats->requested_delay);
-	bool out = false;
-	if (!is_window_full)
-		out = !(t_current < t_pkt) && t_current - t_pkt < grinder->dejitter_stats->requested_delay;
-	else
-		out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
-	if (out) {
-		if (times->actual_delay == 0) {
-			// store the timestamp of the first time the packet got delayed
-			times->actual_delay = t_current;
-		}
-	} else if (times->actual_delay != 0) {
+	const bool out = !(t_current < t_pkt) && t_current - t_pkt < t_threshold;
+	if (out && times->delay_start == 0) {
+		// store the timestamp of the first time the packet got delayed
+		times->delay_start = t_current;
+	} else if (times->delay_start > 0) {
 		// If the packet no longer needs delay, set the time it was delayed for
-		times->actual_delay = t_current > times->actual_delay ? t_current - times->actual_delay : 0;
+		times->actual_delay = t_current >= times->delay_start ? t_current - times->delay_start : 0;
 	}
 	// printf("Delta T: %lu,\t T95: %lu\n", t_current - t_pkt, grinder->dejitter_stats->t_95);
 		// printf("Current T: %ld%ld ns\nT Sent   : %ld\nDelta T  :          %lu\nT 95%%: %ld\n", t_current.tv_sec, t_current.tv_nsec, get_t_sent(grinder->pkt), rte_sched_dejitter_time() - get_t_sent(grinder->pkt), grinder->dejitter_stats->t_95);
