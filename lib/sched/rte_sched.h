@@ -5,6 +5,7 @@
 #ifndef __INCLUDE_RTE_SCHED_H__
 #define __INCLUDE_RTE_SCHED_H__
 
+#include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -334,6 +335,7 @@ struct pkt_latency {
 	/**The time interval for how long was the package kept back*/
 	uint64_t actual_delay;
 	uint64_t delay_start;
+	uint64_t t_in_shaper;
 };
 
 /*
@@ -693,7 +695,7 @@ rte_sched_dejitter_set(struct rte_sched_port* port, bool enabled);
  * Sets the t_sent dynfield for the mbuf. The dynfield is used for dejittering.
  * */
 int
-rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times);
+rte_sched_set_t_sent(struct rte_mbuf *m, struct pkt_latency* pkt_times);
 
 #ifdef __cplusplus
 }

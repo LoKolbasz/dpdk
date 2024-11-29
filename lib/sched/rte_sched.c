@@ -297,8 +297,8 @@ struct pkt_latency* get_pkt_times(const struct rte_mbuf *m) {
 		printf("ERR: offset was not initialized\n");
 		return NULL;
 	}
-	struct pkt_latency* lat = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency*);
-	return lat;
+	struct pkt_latency** lat = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency**);
+	return *lat;
 }
 static inline bool need_delay(struct rte_sched_grinder *grinder);
 
@@ -1046,8 +1046,8 @@ rte_sched_port_config(struct rte_sched_port_params *params)
 	port->dejitter_enabled = params->dejittering_enabled;
 	struct rte_mbuf_dynfield pkt_times_params = {
 		"rte_sched_t_stats",
-		sizeof(struct pkt_latency),
-		alignof(struct pkt_latency),
+		sizeof(struct pkt_latency*),
+		alignof(struct pkt_latency*),
 		0
 	};
 	/* By always initializing the dynfield we can avoid invalid memory accesses from an
@@ -1057,7 +1057,7 @@ rte_sched_port_config(struct rte_sched_port_params *params)
 	if (res >= 0)
 		pkt_times_offset = res;
 	else {
-		RTE_LOG(ERR, SCHED, "Could not create dynfield for pkt_times.\n%s\n", rte_strerror(rte_errno));
+		RTE_LOG(ERR, SCHED, "Could not create dynfield for pkt_times: %s\n", rte_strerror(rte_errno));
 		return NULL;
 	}
 	/* Timing */
@@ -2311,6 +2311,12 @@ rte_sched_port_enqueue(struct rte_sched_port *port, struct rte_mbuf **pkts,
 	result = 0;
 	subport_qmask = (1 << (port->n_pipes_per_subport_log2 + 4)) - 1;
 
+	uint64_t current_time = rte_sched_dejitter_time();
+	// Add timestamp to packets
+	for (size_t i = 0; i < n_pkts; ++i) {
+		get_pkt_times(pkts[i])->t_in_shaper = current_time;
+	}
+
 	/* TODO: prefetch stats alongside queues to improve performance (although the CPU might predict mem accesses just fine) */
 	/*
 	 * Less then 6 input packets available, which is not enough to
@@ -3073,18 +3079,14 @@ grinder_prefetch_mbuf(struct rte_sched_subport *subport, uint32_t pos)
 	}
 }
 int
-rte_sched_set_t_sent(struct rte_mbuf *m, const struct pkt_latency* pkt_times) {
+rte_sched_set_t_sent(struct rte_mbuf *m, struct pkt_latency* pkt_times) {
 	if (unlikely(pkt_times_offset < 0))
 		return -1;
-	struct pkt_latency *fields = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency*);
+	struct pkt_latency **fields = RTE_MBUF_DYNFIELD(m, pkt_times_offset, struct pkt_latency**);
 	if (fields == NULL) {
 		return -1;
 	}
-
-	fields->t_sent = pkt_times->t_sent;
-	fields->delta_t = pkt_times->delta_t;
-	fields->actual_delay = 0;
-	fields->delay_start = 0;
+	*fields = pkt_times;
 	return 0;
 }
 
@@ -3328,6 +3330,11 @@ rte_sched_port_dequeue(struct rte_sched_port *port, struct rte_mbuf **pkts, uint
 			break;
 		}
 	}
+	uint64_t current_time = rte_sched_dejitter_time();
+	for (size_t i = 0; i < count; ++i) {
+		struct pkt_latency *t = get_pkt_times(pkts[i]);
+		t->t_in_shaper = current_time >= t->t_in_shaper ? current_time - t->t_in_shaper : 0;
+	}
 
 	return count;
 }
@@ -3336,8 +3343,8 @@ void rte_sched_dejitter_set(struct rte_sched_port* port, bool enabled) {
 	port->dejitter_enabled = enabled;
 }
 
-uint32_t rte_sched_get_queue_pop(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay) {
-	struct rte_sched_subport *port_subport = port->subports[subport];
-	rte_sched_port_qindex(port, subport, pipe, traffic_class, queue);
-	return port_subport->queue[RTE_SCHED_QUEUES_PER_PIPE * pipe + traffic_class + queue].qr;
-}
+// uint32_t rte_sched_get_queue_pop(struct rte_sched_port* port, uint32_t subport, uint32_t pipe, uint_fast8_t traffic_class, uint_fast8_t queue, uint64_t requested_minimum_delay) {
+// 	struct rte_sched_subport *port_subport = port->subports[subport];
+// 	rte_sched_port_qindex(port, subport, pipe, traffic_class, queue);
+// 	return port_subport->queue[RTE_SCHED_QUEUES_PER_PIPE * pipe + traffic_class + queue].qr;
+// }
